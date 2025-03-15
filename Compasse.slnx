@@ -1,0 +1,8 @@
+﻿<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="README.md" />
+    <File Path=".gitignore" />
+  </Folder>
+  <Project Path="Compasse\Compasse.csproj" Type="Classic C#" />
+  <Project Path="MyMcpSseApp\MyMcpSseApp.csproj" Type="Classic C#" />
+</Solution>
