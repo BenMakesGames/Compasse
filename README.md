@@ -57,20 +57,20 @@ public sealed class GetFruitResponse
 }
 ```
 
-Once that's up and running, point your AI agent at it (when running locally, that's typically http://localhost:5000/sse), and it will now have access to `prompt/fruit`.
+Once that's up and running, point your AI agent at it (when running locally, that's typically http://localhost:5000/sse), and it will now have access to `prompts/fruit`.
 
 ### Q&A
 
-Last updated 2024-03-14.
+(Q&A last updated on 2024-03-14.)
 
-**Q. How do you say "compasse"?**
+**Q. How do you say "compasse"?**<br>
 A. I can't see that it matters. But if you like feeling fancy, you can try and put a French spin on it.
 
-**Q. Is it AOT ready?**
+**Q. Is it AOT ready?**<br>
 A. I can't imagine it is. But if you like feeling fancy, please make a positive PR. (I think it might be a lot of work, but I'm not as handy with source generators as you might be.)
 
-**Q. Is it production ready?**
+**Q. Is it production ready?**<br>
 A. I can't imagine it is. But if you like feeling fancy, please make a positive PR.
 
-**Q. You did something ridiculous, and I hate it.**
+**Q. You did something ridiculous, and I hate it.**<br>
 A. That's not a question. But you're probably right: I learned SSE and JSON-RPC, like, 2 days ago. BUT - can you guess where this is going? - if you like feeling fancy, please make a positive PR.
