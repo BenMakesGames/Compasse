@@ -8,8 +8,4 @@
         <WarningsAsErrors>Nullable</WarningsAsErrors>
     </PropertyGroup>
 
-    <ItemGroup>
-      <PackageReference Include="StreamJsonRpc" Version="2.21.10" />
-    </ItemGroup>
-
 </Project>

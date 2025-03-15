@@ -18,7 +18,7 @@ public static class WebApplicationBuilderExtensions
             {
                 policy
                     .SetIsOriginAllowed(_ => true) // For development - replace with specific origins in production
-                    .WithMethods("OPTION", "GET", "POST")
+                    .AllowAnyMethod()
                     .AllowAnyHeader()
                     .WithExposedHeaders("Content-Type", "Content-Length")
                     .AllowCredentials(); // Required for EventSource in some browsers

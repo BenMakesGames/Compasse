@@ -21,6 +21,7 @@
         .error { color: red; }
         .info { color: gray; }
         .endpoint { color: purple; }
+        .success { color: #008000; }
         .controls {
             margin-bottom: 20px;
         }
@@ -35,6 +36,10 @@
         #serverUrl, #postEndpoint {
             width: 300px;
             margin-right: 10px;
+        }
+        .pending {
+            opacity: 0.6;
+            font-style: italic;
         }
     </style>
 </head>
@@ -77,10 +82,19 @@
         let connectionAttempts = 0;
         const MAX_RECONNECT_ATTEMPTS = 3;
         
-        function logMessage(message, type) {
+        // Keep track of pending requests
+        const pendingRequests = new Map();
+        
+        function logMessage(message, type, id = null) {
             const timestamp = new Date().toISOString();
             const entry = document.createElement('div');
             entry.className = type;
+            if (id !== null) {
+                entry.id = `request-${id}`;
+                if (type === 'request') {
+                    entry.classList.add('pending');
+                }
+            }
             entry.textContent = `[${timestamp}] ${message}`;
             log.appendChild(entry);
             log.scrollTop = log.scrollHeight;
@@ -139,13 +153,58 @@
                 
                 // Handle message events (JSON-RPC responses)
                 eventSource.addEventListener('message', function(event) {
-                    logMessage(`Received message: ${event.data}`, 'response');
-                    
+                    logMessage(`Raw SSE message event:`, 'info');
+                    logMessage(`data: "${event.data}"`, 'info');
+                    logMessage(`type: ${event.type}`, 'info');
+                    logMessage(`lastEventId: ${event.lastEventId}`, 'info');
+                    logMessage(`origin: ${event.origin}`, 'info');
+                    logMessage(`Byte length: ${new TextEncoder().encode(event.data).length}`, 'info');
+
                     try {
                         const response = JSON.parse(event.data);
-                        // Handle specific responses if needed
+                        
+                        // Check if this is a JSON-RPC response
+                        if (response.jsonrpc === '2.0') {
+                            const id = response.id;
+                            const requestEntry = document.getElementById(`request-${id}`);
+                            
+                            if (requestEntry) {
+                                requestEntry.classList.remove('pending');
+                            }
+                            
+                            if (response.error) {
+                                // Error response
+                                logMessage(
+                                    `Error response for request ${id}: [${response.error.code}] ${response.error.message}`,
+                                    'error',
+                                    id
+                                );
+                            } else {
+                                // Success response
+                                const resultStr = JSON.stringify(response.result, null, 2);
+                                logMessage(
+                                    `Success response for request ${id}:\n${resultStr}`,
+                                    'success',
+                                    id
+                                );
+                            }
+                            
+                            // Remove from pending requests
+                            pendingRequests.delete(id);
+                        } else {
+                            // Non JSON-RPC message
+                            logMessage(`Received non-RPC message: ${event.data}`, 'response');
+                        }
                     } catch (e) {
                         logMessage(`Error parsing message: ${e.message}`, 'error');
+                        // Show the raw message with more detail about its structure
+                        logMessage(`Raw message (as array of characters):`, 'error');
+                        const chars = Array.from(event.data).map(c => ({
+                            char: c,
+                            code: c.charCodeAt(0),
+                            hex: c.charCodeAt(0).toString(16)
+                        }));
+                        logMessage(JSON.stringify(chars, null, 2), 'error');
                     }
                 });
                 
@@ -155,6 +214,13 @@
                     
                     if (eventSource.readyState === EventSource.CLOSED) {
                         logMessage('EventSource connection closed', 'error');
+                        
+                        // Clear any pending requests
+                        for (const [id, request] of pendingRequests) {
+                            logMessage(`Request ${id} cancelled due to connection close`, 'error', id);
+                        }
+                        pendingRequests.clear();
+                        
                     } else if (eventSource.readyState === EventSource.CONNECTING) {
                         logMessage('EventSource is reconnecting...', 'info');
                     }
@@ -168,11 +234,6 @@
                         connectionAttempts = 0;
                     }
                 });
-                
-                // Listen for any other events
-                eventSource.onmessage = function(event) {
-                    logMessage(`Default message handler: ${event.data}`, 'response');
-                };
             } catch (error) {
                 logMessage(`Error creating EventSource: ${error.message}`, 'error');
                 updateStatus('Connection failed', true);
@@ -188,6 +249,12 @@
                 connectionAttempts = 0;
                 postEndpointInput.value = '';
                 postEndpointInput.disabled = true;
+                
+                // Clear any pending requests
+                for (const [id, request] of pendingRequests) {
+                    logMessage(`Request ${id} cancelled due to disconnect`, 'error', id);
+                }
+                pendingRequests.clear();
             } else {
                 logMessage('No active SSE connection to close', 'info');
             }
@@ -201,8 +268,12 @@
             }
             
             const method = methodSelect.value;
-            let params;
+            if (!method) {
+                logMessage('Method name is required', 'error');
+                return;
+            }
             
+            let params;
             try {
                 params = paramsInput.value ? JSON.parse(paramsInput.value) : {};
             } catch (e) {
@@ -210,15 +281,19 @@
                 return;
             }
             
+            const id = nextId++;
             const request = {
                 jsonrpc: "2.0",
                 method: method,
                 params: params,
-                id: nextId++
+                id: id
             };
             
-            const requestStr = JSON.stringify(request);
-            logMessage(`Sending request to ${postEndpoint}: ${requestStr}`, 'request');
+            // Store the request
+            pendingRequests.set(id, request);
+            
+            const requestStr = JSON.stringify(request, null, 2);
+            logMessage(`Sending request ${id}:\n${requestStr}`, 'request', id);
             
             try {
                 const response = await fetch(postEndpoint, {
@@ -226,25 +301,28 @@
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: requestStr
+                    body: JSON.stringify(request)
                 });
                 
                 if (!response.ok) {
-                    logMessage(`HTTP error: ${response.status} ${response.statusText}`, 'error');
+                    logMessage(`HTTP error for request ${id}: ${response.status} ${response.statusText}`, 'error', id);
+                    pendingRequests.delete(id);
                     
                     // Try to read the response body for more details
                     try {
                         const errorText = await response.text();
-                        logMessage(`Error response: ${errorText}`, 'error');
+                        logMessage(`Error details for request ${id}: ${errorText}`, 'error', id);
                     } catch (e) {
-                        logMessage(`Could not read error response: ${e.message}`, 'error');
+                        logMessage(`Could not read error response for request ${id}: ${e.message}`, 'error', id);
                     }
                 } else {
-                    const responseText = await response.text();
-                    logMessage(`POST response: ${responseText}`, 'response');
+                    // For successful POST requests, we expect a 202 Accepted
+                    // The actual response will come through the SSE connection
+                    logMessage(`Request ${id} accepted by server`, 'info', id);
                 }
             } catch (error) {
-                logMessage(`Error sending request: ${error.message}`, 'error');
+                logMessage(`Network error for request ${id}: ${error.message}`, 'error', id);
+                pendingRequests.delete(id);
             }
         }
         
@@ -253,12 +331,12 @@
         disconnectBtn.addEventListener('click', disconnectSSE);
         sendBtn.addEventListener('click', sendRequest);
         
-        // Initialize with some default parameters
-        paramsInput.value = '{}';
-        
-        // Log startup
-        logMessage('Test client initialized', 'info');
-        logMessage('Click "Connect SSE" to establish a connection', 'info');
+        // Allow pressing Enter in the method input to send request
+        methodSelect.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendRequest();
+            }
+        });
     </script>
 </body>
 </html>

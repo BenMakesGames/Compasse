@@ -1,24 +1,28 @@
 using System.Text;
 using System.Text.Json;
 using Compasse.Model;
-using Nerdbank.Streams;
-using StreamJsonRpc;
+using System.Collections.Concurrent;
+using System.Text.Json.Serialization;
 
 namespace Compasse.Endpoints;
 
 internal static class SseEndpoint
 {
-    // Shared JsonRpc instance for handling requests from POST endpoints
-    // and sending responses/notifications via SSE
-    private static JsonRpc? JsonRpc;
-    private static Stream? ClientStream;
-    private static Stream? ServerStream;
+    // Thread-safe dictionary to store SSE response streams for each client
+    private static readonly ConcurrentDictionary<string, Stream> _clientStreams = new();
 
     private static JsonSerializerOptions JsonSerializerOptions => new JsonSerializerOptions
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,
-        WriteIndented = true,
+    };
+
+    // For SSE responses specifically, we want to avoid newlines in the JSON
+    private static JsonSerializerOptions SseJsonSerializerOptions => new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+        WriteIndented = false,
     };
 
     internal static async Task Handle(
@@ -50,10 +54,15 @@ internal static class SseEndpoint
         CancellationToken ctx
     )
     {
-        Console.WriteLine($"SSE connection started: {context.Request.Method} {context.Request.Path}");
+        // Generate a unique client ID
+        var clientId = Guid.NewGuid().ToString();
+        Console.WriteLine($"SSE connection started for client {clientId}: {context.Request.Method} {context.Request.Path}");
 
         try
         {
+            // Store the client's response stream
+            _clientStreams.TryAdd(clientId, context.Response.Body);
+
             // Set headers for SSE
             context.Response.Headers.ContentType = "text/event-stream";
             context.Response.Headers.CacheControl = "no-cache";
@@ -70,7 +79,7 @@ internal static class SseEndpoint
             // Send the required 'endpoint' event according to MCP specification
             // This tells the client where to send POST requests
             var baseUrl = $"{context.Request.Scheme}://{context.Request.Host}";
-            var postEndpoint = $"{baseUrl}{context.Request.PathBase}{context.Request.Path}";
+            var postEndpoint = $"{baseUrl}{context.Request.PathBase}{context.Request.Path}?clientId={clientId}";
 
             var endpointEvent = $"event: endpoint\ndata: {postEndpoint}\n\n";
             var endpointBytes = Encoding.UTF8.GetBytes(endpointEvent);
@@ -78,28 +87,6 @@ internal static class SseEndpoint
             await context.Response.Body.FlushAsync(ctx);
 
             Console.WriteLine($"Endpoint event sent: {postEndpoint}");
-
-            // Create a duplex stream for JSON-RPC if not already created
-            if (JsonRpc == null)
-            {
-                var streams = FullDuplexStream.CreatePair();
-                ClientStream = streams.Item1;
-                ServerStream = streams.Item2;
-
-                // Create a JsonRpc instance that communicates over the server stream
-                JsonRpc = new JsonRpc(ServerStream);
-
-                // Register methods from the tool registry
-                foreach (var method in toolRegistry.Methods)
-                {
-                    var info = toolRegistry.GetToolMethod(serviceProvider, method);
-                    JsonRpc.AddLocalRpcMethod(method, info.MethodInfo, info.Tool);
-                }
-
-                // Start listening for JSON-RPC messages
-                JsonRpc.StartListening();
-                Console.WriteLine("JsonRpc started listening");
-            }
 
             // Send a heartbeat every 15 seconds to keep the connection alive
             var heartbeatTask = Task.Run(async () =>
@@ -128,58 +115,11 @@ internal static class SseEndpoint
                 }
             }, ctx);
 
-            // Start a task to read from the JsonRpc client stream and forward messages to the SSE connection
-            var responseTask = Task.Run(async () =>
-            {
-                var buffer = new byte[4096];
-                try
-                {
-                    Console.WriteLine("Starting to read JSON-RPC responses");
-                    while (!ctx.IsCancellationRequested && ClientStream != null)
-                    {
-                        int bytesRead = await ClientStream.ReadAsync(buffer, 0, buffer.Length, ctx);
-                        if (bytesRead == 0)
-                        {
-                            Console.WriteLine("End of JSON-RPC stream reached");
-                            break; // End of stream
-                        }
-
-                        // Get the JSON-RPC message as a string
-                        var jsonRpcMessage = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                        Console.WriteLine($"Received JSON-RPC message: {jsonRpcMessage}");
-
-                        // Format as SSE message event
-                        var sseMessage = $"event: message\ndata: {jsonRpcMessage}\n\n";
-                        var responseBytes = Encoding.UTF8.GetBytes(sseMessage);
-
-                        await context.Response.Body.WriteAsync(responseBytes, 0, responseBytes.Length, ctx);
-                        await context.Response.Body.FlushAsync(ctx);
-                        Console.WriteLine("SSE message sent to client");
-                    }
-                }
-                catch (Exception ex) when (!ctx.IsCancellationRequested)
-                {
-                    // Log unexpected errors
-                    Console.WriteLine($"Error processing JSON-RPC response: {ex.Message}");
-
-                    // Send error as SSE event
-                    var errorMessage = $"event: message\ndata: {{\"jsonrpc\":\"2.0\",\"error\":{{\"code\":-32000,\"message\":\"Internal error: {ex.Message}\"}}}}\n\n";
-                    var errorBytes = Encoding.UTF8.GetBytes(errorMessage);
-                    await context.Response.Body.WriteAsync(errorBytes, 0, errorBytes.Length, ctx);
-                    await context.Response.Body.FlushAsync(ctx);
-                }
-                catch (Exception ex) when (ctx.IsCancellationRequested)
-                {
-                    // Expected when the client disconnects
-                    Console.WriteLine($"JSON-RPC response processing cancelled: {ex.Message}");
-                }
-            }, ctx);
-
             try
             {
-                // Wait for any task to complete or the connection to be cancelled
-                await Task.WhenAny(responseTask, heartbeatTask);
-                Console.WriteLine("One of the SSE tasks completed");
+                // Wait for the heartbeat task to complete or the connection to be cancelled
+                await heartbeatTask;
+                Console.WriteLine("SSE connection ended");
             }
             catch (OperationCanceledException) when (ctx.IsCancellationRequested)
             {
@@ -190,6 +130,11 @@ internal static class SseEndpoint
             {
                 // Log unexpected errors
                 Console.WriteLine($"Unexpected error in SSE endpoint: {ex.Message}");
+            }
+            finally
+            {
+                // Remove the client's stream when the connection ends
+                _clientStreams.TryRemove(clientId, out _);
             }
         }
         catch (Exception ex)
@@ -210,6 +155,15 @@ internal static class SseEndpoint
 
         try
         {
+            // Get the client ID from the query string
+            var clientId = context.Request.Query["clientId"].ToString();
+            if (string.IsNullOrEmpty(clientId) || !_clientStreams.TryGetValue(clientId, out var clientStream))
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await context.Response.WriteAsync("Invalid or missing clientId", ctx);
+                return;
+            }
+
             // Read the request body
             using var reader = new StreamReader(context.Request.Body);
             var requestBody = await reader.ReadToEndAsync(ctx);
@@ -220,7 +174,8 @@ internal static class SseEndpoint
 
             if (request == null)
             {
-                await SendErrorResponse(context, -32700, "Parse error", null, ctx);
+                await SendErrorResponseSse(clientStream, -32700, "Parse error", null, ctx);
+                context.Response.StatusCode = StatusCodes.Status202Accepted;
                 return;
             }
 
@@ -232,7 +187,8 @@ internal static class SseEndpoint
 
             if (method == null)
             {
-                await SendErrorResponse(context, -32601, "Method not found", request.Id, ctx);
+                await SendErrorResponseSse(clientStream, -32601, "Method not found", request.Id, ctx);
+                context.Response.StatusCode = StatusCodes.Status202Accepted;
                 return;
             }
 
@@ -269,23 +225,26 @@ internal static class SseEndpoint
                     }
                 }
 
-                // Send the response
-                await SendSuccessResponse(context, result, request.Id, ctx);
+                // Send the response through SSE
+                await SendSuccessResponseSse(clientStream, result, request.Id, ctx);
+                context.Response.StatusCode = StatusCodes.Status202Accepted;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error invoking method: {ex.Message}");
-                await SendErrorResponse(context, -32000, $"Error invoking method: {ex.Message}", request.Id, ctx);
+                await SendErrorResponseSse(clientStream, -32000, $"Error invoking method: {ex.Message}", request.Id, ctx);
+                context.Response.StatusCode = StatusCodes.Status202Accepted;
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Error processing POST request: {ex.Message}");
-            await SendErrorResponse(context, -32700, $"Parse error: {ex.Message}", null, ctx);
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsync($"Error processing request: {ex.Message}", ctx);
         }
     }
 
-    private static async Task SendSuccessResponse<T>(HttpContext context, T result, int id, CancellationToken cancellationToken)
+    private static async Task SendSuccessResponseSse<T>(Stream clientStream, T result, int id, CancellationToken cancellationToken)
     {
         var response = new JsonRpcResponse<T>
         {
@@ -294,11 +253,24 @@ internal static class SseEndpoint
             Id = id
         };
 
-        context.Response.ContentType = "application/json";
-        await JsonSerializer.SerializeAsync(context.Response.Body, response, cancellationToken: cancellationToken);
+        // First serialize the response to JSON without indentation
+        var json = JsonSerializer.Serialize(response, SseJsonSerializerOptions);
+        
+        // Create the complete SSE message with explicit line endings
+        var sseMessage = $"event: message\ndata: {json}\n\n";
+        
+        // Convert to bytes and write in a single operation
+        var messageBytes = Encoding.UTF8.GetBytes(sseMessage);
+        Console.WriteLine($"Sending SSE message (length: {messageBytes.Length} bytes):");
+        Console.WriteLine(BitConverter.ToString(messageBytes));
+        
+        await clientStream.WriteAsync(messageBytes, 0, messageBytes.Length, cancellationToken);
+        await clientStream.FlushAsync(cancellationToken);
+        
+        Console.WriteLine($"Sent success response for request {id}: {json}");
     }
 
-    private static async Task SendErrorResponse(HttpContext context, int code, string message, int? id, CancellationToken cancellationToken)
+    private static async Task SendErrorResponseSse(Stream clientStream, int code, string message, int? id, CancellationToken cancellationToken)
     {
         var response = new JsonRpcErrorResponse
         {
@@ -311,12 +283,26 @@ internal static class SseEndpoint
             Id = id
         };
 
-        context.Response.ContentType = "application/json";
-        await JsonSerializer.SerializeAsync(context.Response.Body, response, cancellationToken: cancellationToken);
+        // First serialize the response to JSON without indentation
+        var json = JsonSerializer.Serialize(response, SseJsonSerializerOptions);
+        
+        // Create the complete SSE message with explicit line endings
+        var sseMessage = $"event: message\ndata: {json}\n\n";
+        
+        // Convert to bytes and write in a single operation
+        var messageBytes = Encoding.UTF8.GetBytes(sseMessage);
+        Console.WriteLine($"Sending SSE message (length: {messageBytes.Length} bytes):");
+        Console.WriteLine(BitConverter.ToString(messageBytes));
+        
+        await clientStream.WriteAsync(messageBytes, 0, messageBytes.Length, cancellationToken);
+        await clientStream.FlushAsync(cancellationToken);
+        
+        Console.WriteLine($"Sent error response for request {id}: {json}");
     }
 
     public class JsonRpcResponse<T>
     {
+        [JsonPropertyName("jsonrpc")]
         public required string JsonRpc { get; set; } = "2.0";
         public required T Result { get; init; }
         public required int Id { get; init; }
@@ -324,6 +310,7 @@ internal static class SseEndpoint
 
     public class JsonRpcErrorResponse
     {
+        [JsonPropertyName("jsonrpc")]
         public required string JsonRpc { get; set; } = "2.0";
         public required JsonRpcError Error { get; init; }
         public required int? Id { get; init; }
