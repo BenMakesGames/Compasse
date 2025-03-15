@@ -1,13 +1,30 @@
-﻿namespace Compasse.Model;
+﻿using System.Text.Json;
+using System.Text.Json.Serialization;
 
-public class JsonRpcRequest
+namespace Compasse.Model;
+
+public class JsonRpcMessage
 {
     public required string JsonRpc { get; init; }
     public required string Method { get; init; }
-    public required int Id { get; init; }
 }
 
-public class JsonRpcRequest<T> : JsonRpcRequest
+public class JsonRpcRequest: JsonRpcMessage
 {
-    public required T Params { get; init; }
+    [JsonConverter(typeof(IdConverter))]
+    public required string Id { get; init; }
+
+    public JsonElement? Params { get; init; }
+}
+
+public class JsonRpcToolParams
+{
+    public required string Name { get; init; }
+    public required JsonElement? Arguments { get; init; }
+}
+
+public class JsonRpcPromptParams
+{
+    public required string Name { get; init; }
+    public required JsonElement? Arguments { get; init; }
 }

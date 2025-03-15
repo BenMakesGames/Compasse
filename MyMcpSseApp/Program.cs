@@ -5,7 +5,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder
     .AddCompasse()
-    .AddTool<GetFruit>()
+    .AddPrompt<GetFruitPrompt>()
+    .AddTool<GetFruitTool>()
 ;
 
 var app = builder.Build();

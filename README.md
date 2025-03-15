@@ -13,6 +13,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder
     .AddCompasse() // add Compasse
     .AddTool<GetFruit>() // add a tool you made!
+    // .AddPrompt and .AddResource are also available
 ;
 
 var app = builder.Build();
@@ -22,16 +23,16 @@ app.MapCompasse(); // map Compasse endpoints
 await app.RunAsync();
 ```
 
-And here is what that tool might look like:
+And here is what that method might look like:
 
 ```c#
-using Compasse.Tools;
+using Compasse;
 
 namespace MyMcpSseApp;
 
 public sealed class GetFruit: ITool<GetFruitRequest, GetFruitResponse>
 {
-    public static string Method => "prompts/fruit";
+    public static string Method => "get_fruit";
     public static string Description => "Gets a fruit.";
 
     // if you need some services, inject 'em with constructor DI
@@ -57,7 +58,9 @@ public sealed class GetFruitResponse
 }
 ```
 
-Once that's up and running, point your AI agent at it (when running locally, that's typically http://localhost:5000/sse), and it will now have access to `prompts/fruit`.
+`IPrompt<,>` and `IResource` are similar.
+
+Once that's up and running, point your AI agent at it (when running locally, that's typically http://localhost:5000/sse).
 
 ### Q&A
 

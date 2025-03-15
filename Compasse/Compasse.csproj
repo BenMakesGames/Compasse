@@ -8,4 +8,8 @@
         <WarningsAsErrors>Nullable</WarningsAsErrors>
     </PropertyGroup>
 
+    <ItemGroup>
+      <Folder Include="Endpoints\" />
+    </ItemGroup>
+
 </Project>

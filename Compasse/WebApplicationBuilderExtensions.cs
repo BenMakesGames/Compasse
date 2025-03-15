@@ -1,15 +1,12 @@
-﻿using Compasse.Endpoints;
-using Compasse.Tools;
-
-namespace Compasse;
+﻿namespace Compasse;
 
 public static class WebApplicationBuilderExtensions
 {
-    private static readonly IToolRegistry ToolRegistry = new ToolRegistry();
+    private static readonly MethodRegistry MethodRegistry = new();
 
     public static WebApplicationBuilder AddCompasse(this WebApplicationBuilder builder)
     {
-        builder.Services.AddSingleton(ToolRegistry);
+        builder.Services.AddSingleton<IMethodRegistry>(MethodRegistry);
 
         // Add CORS support with specific allowed origins
         builder.Services.AddCors(options =>
@@ -25,7 +22,22 @@ public static class WebApplicationBuilderExtensions
             });
         });
 
-        builder.AddTool<PromptsList>();
+        return builder;
+    }
+
+    public static WebApplicationBuilder AddPrompt<TPrompt>(this WebApplicationBuilder builder) where TPrompt : IPrompt
+    {
+        // use reflection to check if the given tool implements IPrompt<TRequest, TResponse>
+        // if it does, register it as a transient service
+        var methodInterface = typeof(TPrompt).GetInterfaces()
+            .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IPrompt<,>));
+
+        if (methodInterface is null)
+            throw new InvalidOperationException($"Prompt {typeof(TPrompt).Name} must implement IPrompt<TRequest, TResponse>.");
+
+        MethodRegistry.RegisterPrompt<TPrompt>();
+
+        builder.Services.AddTransient(methodInterface, typeof(TPrompt));
 
         return builder;
     }
@@ -34,25 +46,27 @@ public static class WebApplicationBuilderExtensions
     {
         // use reflection to check if the given tool implements ITool<TRequest, TResponse>
         // if it does, register it as a transient service
-        var toolInterface = typeof(TTool).GetInterfaces()
-            .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(ITool<,>));
+        var methodInterface = typeof(TTool).GetInterfaces()
+            .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(ITool<>));
 
-        if (toolInterface is null)
-            throw new InvalidOperationException($"Tool {typeof(TTool).Name} must implement ITool<TRequest, TResponse>.");
+        if (methodInterface is null)
+            throw new InvalidOperationException($"Tool {typeof(TTool).Name} must implement IMethod<TRequest, TResponse>.");
 
-        builder.Services.AddTransient(toolInterface, typeof(TTool));
+        builder.Services.AddTransient(methodInterface, typeof(TTool));
 
-        ToolRegistry.RegisterTool<TTool>();
+        MethodRegistry.RegisterTool<TTool>();
 
         return builder;
     }
 
     public static WebApplication MapCompasse(this WebApplication app, string path = "/sse")
     {
+        MethodRegistry.SetServiceProvider(app.Services);
+
         // Use CORS before mapping endpoints
         app.UseCors("CompasseCorsPolicy");
 
-        app.Map(path, SseEndpoint.Handle);
+        app.Map(path, SseEndpoints.Handle);
 
         return app;
     }
