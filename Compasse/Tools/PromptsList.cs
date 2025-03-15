@@ -10,8 +10,8 @@ public sealed class PromptsList(IToolRegistry toolRegistry): ITool<PromptsListRe
         var prompts = toolRegistry.Methods
             .Select(method => new Prompt
             {
-                Name = method,
-                Description = "No description available."
+                Name = method.Method,
+                Description = method.Description
             })
             .ToList();
 

@@ -5,15 +5,15 @@ namespace Compasse;
 
 public interface IToolRegistry
 {
-    IEnumerable<string> Methods { get; }
+    IEnumerable<ToolInfo> Methods { get; }
     void RegisterTool<TTool>() where TTool : ITool;
-    (MethodInfo MethodInfo, object Tool, Type RequestType) GetToolMethod(IServiceProvider serviceProvider, string methodName);
+    ToolMethod? GetToolMethod(IServiceProvider serviceProvider, string methodName);
 }
 
 public sealed class ToolRegistry: IToolRegistry
 {
-    public IEnumerable<string> Methods => Tools.Keys.AsEnumerable();
-    public Dictionary<string, (MethodInfo MethodInfo, Type ToolType, Type RequestType, Type ResponseType)> Tools { get; } = [ ];
+    public IEnumerable<ToolInfo> Methods => Tools.Values.AsEnumerable();
+    public Dictionary<string, ToolInfo> Tools { get; } = [ ];
 
     public void RegisterTool<TTool>() where TTool : ITool
     {
@@ -34,19 +34,49 @@ public sealed class ToolRegistry: IToolRegistry
         var methodInfo = toolInterface.GetMethod("Execute")
             ?? throw new InvalidOperationException($"Tool {typeof(TTool).Name} must implement a Execute method.");
 
-        Tools[TTool.Method] = (methodInfo, toolInterface, requestType, responseType);
+        Tools[TTool.Method] = new ToolInfo()
+        {
+            Method = TTool.Method,
+            Description = TTool.Description,
+            MethodInfo = methodInfo,
+            ToolType = toolInterface,
+            RequestType = requestType,
+            ResponseType = responseType
+        };
 
         Console.WriteLine("Registered tool: " + TTool.Method);
     }
 
-    public (MethodInfo MethodInfo, object Tool, Type RequestType) GetToolMethod(IServiceProvider serviceProvider, string methodName)
+    public ToolMethod? GetToolMethod(IServiceProvider serviceProvider, string methodName)
     {
         if (!Tools.TryGetValue(methodName, out var method))
-            throw new InvalidOperationException($"Tool with name {methodName} is not registered.");
+            return null;
 
         // create an instance of the tool
         var toolInstance = serviceProvider.GetService(method.ToolType)!;
 
-        return (method.MethodInfo, toolInstance, method.RequestType);
+        return new ToolMethod()
+        {
+            MethodInfo = method.MethodInfo,
+            Tool = toolInstance,
+            RequestType = method.RequestType
+        };
     }
+}
+
+public sealed class ToolInfo
+{
+    public required string Method { get; init; }
+    public required string Description { get; init; }
+    public required MethodInfo MethodInfo { get; init; }
+    public required Type ToolType { get; init; }
+    public required Type RequestType { get; init; }
+    public required Type ResponseType { get; init; }
+}
+
+public sealed class ToolMethod
+{
+    public required MethodInfo MethodInfo { get; init; }
+    public required object Tool { get; init; }
+    public required Type RequestType { get; init; }
 }

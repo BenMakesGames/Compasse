@@ -181,19 +181,15 @@ internal static class SseEndpoint
 
             Console.WriteLine($"Processing method: {request.Method}");
 
-            // Find the method in the tool registry
-            var methodName = request.Method;
-            var method = toolRegistry.Methods.FirstOrDefault(m => m == methodName);
+            // Get the method info and invoke it
+            var info = toolRegistry.GetToolMethod(serviceProvider, request.Method);
 
-            if (method == null)
+            if (info is null)
             {
                 await SendErrorResponseSse(clientStream, -32601, "Method not found", request.Id, ctx);
                 context.Response.StatusCode = StatusCodes.Status202Accepted;
                 return;
             }
-
-            // Get the method info and invoke it
-            var info = toolRegistry.GetToolMethod(serviceProvider, method);
 
             try
             {
@@ -255,18 +251,18 @@ internal static class SseEndpoint
 
         // First serialize the response to JSON without indentation
         var json = JsonSerializer.Serialize(response, SseJsonSerializerOptions);
-        
+
         // Create the complete SSE message with explicit line endings
         var sseMessage = $"event: message\ndata: {json}\n\n";
-        
+
         // Convert to bytes and write in a single operation
         var messageBytes = Encoding.UTF8.GetBytes(sseMessage);
         Console.WriteLine($"Sending SSE message (length: {messageBytes.Length} bytes):");
         Console.WriteLine(BitConverter.ToString(messageBytes));
-        
+
         await clientStream.WriteAsync(messageBytes, 0, messageBytes.Length, cancellationToken);
         await clientStream.FlushAsync(cancellationToken);
-        
+
         Console.WriteLine($"Sent success response for request {id}: {json}");
     }
 
@@ -285,18 +281,18 @@ internal static class SseEndpoint
 
         // First serialize the response to JSON without indentation
         var json = JsonSerializer.Serialize(response, SseJsonSerializerOptions);
-        
+
         // Create the complete SSE message with explicit line endings
         var sseMessage = $"event: message\ndata: {json}\n\n";
-        
+
         // Convert to bytes and write in a single operation
         var messageBytes = Encoding.UTF8.GetBytes(sseMessage);
         Console.WriteLine($"Sending SSE message (length: {messageBytes.Length} bytes):");
         Console.WriteLine(BitConverter.ToString(messageBytes));
-        
+
         await clientStream.WriteAsync(messageBytes, 0, messageBytes.Length, cancellationToken);
         await clientStream.FlushAsync(cancellationToken);
-        
+
         Console.WriteLine($"Sent error response for request {id}: {json}");
     }
 
