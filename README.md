@@ -1,3 +1,7 @@
+> 🧚‍♀️ **Hey, listen!** Microsoft has an official MCP package, including support for SSE, here: https://github.com/modelcontextprotocol/csharp-sdk/issues
+>
+> Use that! This project has been archived.
+
 # Compasse
 
 **Compasse** is an MCP SSE framework for .NET. (Yes, the "m" and "c" are a little mixed up there. I tried my best.)
