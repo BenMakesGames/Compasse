@@ -1,24 +1,18 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
+using Compasse.Methods;
 using Compasse.Model;
-using System.Collections.Concurrent;
-using System.Text.Json.Serialization;
 
-namespace Compasse.Endpoints;
+namespace Compasse;
 
-internal static class SseEndpoint
+internal static class SseEndpoints
 {
     // Thread-safe dictionary to store SSE response streams for each client
-    private static readonly ConcurrentDictionary<string, Stream> _clientStreams = new();
-
-    private static JsonSerializerOptions JsonSerializerOptions => new JsonSerializerOptions
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        PropertyNameCaseInsensitive = true,
-    };
+    private static readonly ConcurrentDictionary<string, Stream> ClientStreams = new();
 
     // For SSE responses specifically, we want to avoid newlines in the JSON
-    private static JsonSerializerOptions SseJsonSerializerOptions => new JsonSerializerOptions
+    private static JsonSerializerOptions SseJsonSerializerOptions => new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,
@@ -27,18 +21,18 @@ internal static class SseEndpoint
 
     internal static async Task Handle(
         HttpContext context,
-        IToolRegistry toolRegistry,
+        IMethodRegistry methodRegistry,
         IServiceProvider serviceProvider,
         CancellationToken ctx
     )
     {
         if(context.Request.Method == "GET")
         {
-            await HandleGet(context, toolRegistry, serviceProvider, ctx);
+            await HandleGet(context, ctx);
         }
         else if (context.Request.Method == "POST")
         {
-            await HandlePost(context, toolRegistry, serviceProvider, ctx);
+            await HandlePost(context, methodRegistry, ctx);
         }
         else
         {
@@ -49,8 +43,6 @@ internal static class SseEndpoint
 
     private static async Task HandleGet(
         HttpContext context,
-        IToolRegistry toolRegistry,
-        IServiceProvider serviceProvider,
         CancellationToken ctx
     )
     {
@@ -61,7 +53,7 @@ internal static class SseEndpoint
         try
         {
             // Store the client's response stream
-            _clientStreams.TryAdd(clientId, context.Response.Body);
+            ClientStreams.TryAdd(clientId, context.Response.Body);
 
             // Set headers for SSE
             context.Response.Headers.ContentType = "text/event-stream";
@@ -134,7 +126,7 @@ internal static class SseEndpoint
             finally
             {
                 // Remove the client's stream when the connection ends
-                _clientStreams.TryRemove(clientId, out _);
+                ClientStreams.TryRemove(clientId, out _);
             }
         }
         catch (Exception ex)
@@ -146,8 +138,7 @@ internal static class SseEndpoint
 
     private static async Task HandlePost(
         HttpContext context,
-        IToolRegistry toolRegistry,
-        IServiceProvider serviceProvider,
+        IMethodRegistry methodRegistry,
         CancellationToken ctx
     )
     {
@@ -157,7 +148,7 @@ internal static class SseEndpoint
         {
             // Get the client ID from the query string
             var clientId = context.Request.Query["clientId"].ToString();
-            if (string.IsNullOrEmpty(clientId) || !_clientStreams.TryGetValue(clientId, out var clientStream))
+            if (string.IsNullOrEmpty(clientId) || !ClientStreams.TryGetValue(clientId, out var clientStream))
             {
                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                 await context.Response.WriteAsync("Invalid or missing clientId", ctx);
@@ -169,59 +160,45 @@ internal static class SseEndpoint
             var requestBody = await reader.ReadToEndAsync(ctx);
             Console.WriteLine($"Received request: {requestBody}");
 
-            // Parse the JSON-RPC request
-            var request = JsonSerializer.Deserialize<JsonRpcRequest>(requestBody, JsonSerializerOptions);
+            // first, try to parse it as a full request
+            var request = TryToDeserialize<JsonRpcRequest>(requestBody);
 
-            if (request == null)
+            if (request is null)
             {
-                await SendErrorResponseSse(clientStream, -32700, "Parse error", null, ctx);
-                context.Response.StatusCode = StatusCodes.Status202Accepted;
+                // no? maybe it's just a message:
+                var message = TryToDeserialize<JsonRpcMessage>(requestBody);
+
+                if (message is null)
+                {
+                    // still no? we don't know what this thing is, then:
+                    await SendErrorResponseSse(clientStream, -32700, "Parse error", null, ctx);
+                    context.Response.StatusCode = StatusCodes.Status202Accepted;
+                    return;
+                }
+
+                // it was a message, but not a full method request...
+                // TODO: maybe we'd care to note this for later; for now, just return:
                 return;
             }
 
             Console.WriteLine($"Processing method: {request.Method}");
 
-            // Get the method info and invoke it
-            var info = toolRegistry.GetToolMethod(serviceProvider, request.Method);
-
-            if (info is null)
-            {
-                await SendErrorResponseSse(clientStream, -32601, "Method not found", request.Id, ctx);
-                context.Response.StatusCode = StatusCodes.Status202Accepted;
-                return;
-            }
-
             try
             {
-                var fullRequest = JsonSerializer.Deserialize(requestBody, info.RequestType, JsonSerializerOptions);
-                object? @params = null;
-
-                if (fullRequest is JsonRpcRequest<object> jsonRpcRequest)
+                var result = request.Method switch
                 {
-                    @params = jsonRpcRequest.Params;
-                }
+                    "initialize" => Invoke<InitializeRequest, InitializeResponse>(Initialize.Execute, request, () => throw new ArgumentException()),
+                    "prompts/list" => Invoke<PromptsListRequest, PromptsListResponse>(r => PromptsList.Execute(methodRegistry, r), request, () => new()),
+                    "prompts/get" => await InvokePrompt(methodRegistry, request, ctx),
 
-                // Invoke the method
-                var result = info.MethodInfo.Invoke(info.Tool, [@params]);
+                    "resources/list" => null, // TODO: implement
+                    //Invoke<ResourcesListRequest, ResourcesResponseRequest>(ResourcesList.Execute, request);
 
-                // Handle async results
-                if (result is Task task)
-                {
-                    await task;
+                    "resources/read" => null, // TODO: implement
+                    "tools/list" => Invoke<ToolsListRequest, ToolsListResponse>(r => ToolsList.Execute(methodRegistry, r), request, () => new()),
+                    "tools/call" => await InvokeTool(methodRegistry, request, ctx),
+                };
 
-                    // Get the result from the task if it's a generic Task<T>
-                    if (task.GetType().IsGenericType)
-                    {
-                        var resultProperty = task.GetType().GetProperty("Result");
-                        result = resultProperty?.GetValue(task);
-                    }
-                    else
-                    {
-                        result = null;
-                    }
-                }
-
-                // Send the response through SSE
                 await SendSuccessResponseSse(clientStream, result, request.Id, ctx);
                 context.Response.StatusCode = StatusCodes.Status202Accepted;
             }
@@ -240,7 +217,93 @@ internal static class SseEndpoint
         }
     }
 
-    private static async Task SendSuccessResponseSse<T>(Stream clientStream, T result, int id, CancellationToken cancellationToken)
+    private static TResponse Invoke<TRequest, TResponse>(Func<TRequest, TResponse> method, JsonRpcRequest request, Func<TRequest> defaultRequest)
+        where TRequest: class
+    {
+        var @params = request.Params is { } paramsJson
+            ? paramsJson.Deserialize<TRequest>(SseJsonSerializerOptions)
+            : null;
+
+        return method(@params ?? defaultRequest());
+    }
+
+    private static async Task<object?> InvokePrompt(IMethodRegistry methodRegistry, JsonRpcRequest request, CancellationToken ctx)
+    {
+        if (request.Params is not {} paramsJson)
+            throw new ArgumentException("Params must not be null.");
+
+        if(paramsJson.Deserialize<JsonRpcPromptParams>(SseJsonSerializerOptions) is not {} @params)
+            throw new ArgumentException("Failed to deserialize params.");
+
+        var promptInfo = methodRegistry.GetPrompt(@params.Name);
+
+        if (promptInfo is null)
+            throw new InvalidOperationException($"There is no prompt named {@params.Name}.");
+
+        var arguments = @params.Arguments?.Deserialize(promptInfo.RequestType, SseJsonSerializerOptions);
+
+        // Invoke the method
+        var result = promptInfo.MethodInfo.Invoke(promptInfo.Prompt, [arguments]);
+
+        // Handle async results
+        if (result is Task task)
+        {
+            await task;
+
+            // Get the result from the task if it's a generic Task<T>
+            if (task.GetType().IsGenericType)
+            {
+                var resultProperty = task.GetType().GetProperty("Result");
+                result = resultProperty?.GetValue(task);
+            }
+            else
+            {
+                result = null;
+            }
+        }
+
+        return result;
+    }
+
+    private static async Task<object?> InvokeTool(IMethodRegistry methodRegistry, JsonRpcRequest request, CancellationToken ctx)
+    {
+        if (request.Params is not {} paramsJson)
+            throw new ArgumentException("Params must not be null.");
+
+        if(paramsJson.Deserialize<JsonRpcToolParams>(SseJsonSerializerOptions) is not {} @params)
+            throw new ArgumentException("Failed to deserialize params.");
+
+        var toolInfo = methodRegistry.GetTool(@params.Name);
+
+        if (toolInfo is null)
+            throw new InvalidOperationException($"There is no tool named {@params.Name}.");
+
+        var arguments = @params.Arguments?.Deserialize(toolInfo.RequestType, SseJsonSerializerOptions);
+
+        // Invoke the method
+        var result = toolInfo.MethodInfo.Invoke(toolInfo.Tool, [arguments]);
+
+        // Handle async results
+        if (result is Task task)
+        {
+            await task;
+
+            // Get the result from the task if it's a generic Task<T>
+            if (task.GetType().IsGenericType)
+            {
+                var resultProperty = task.GetType().GetProperty("Result");
+                result = resultProperty?.GetValue(task);
+            }
+            else
+            {
+                result = null;
+            }
+        }
+
+        return result;
+    }
+
+    private static async Task SendSuccessResponseSse<T>(Stream clientStream, T result, string id, CancellationToken cancellationToken)
     {
         var response = new JsonRpcResponse<T>
         {
@@ -257,8 +320,7 @@ internal static class SseEndpoint
 
         // Convert to bytes and write in a single operation
         var messageBytes = Encoding.UTF8.GetBytes(sseMessage);
-        Console.WriteLine($"Sending SSE message (length: {messageBytes.Length} bytes):");
-        Console.WriteLine(BitConverter.ToString(messageBytes));
+        Console.WriteLine($"Sending SSE success message (length: {messageBytes.Length} bytes)");
 
         await clientStream.WriteAsync(messageBytes, 0, messageBytes.Length, cancellationToken);
         await clientStream.FlushAsync(cancellationToken);
@@ -266,7 +328,7 @@ internal static class SseEndpoint
         Console.WriteLine($"Sent success response for request {id}: {json}");
     }
 
-    private static async Task SendErrorResponseSse(Stream clientStream, int code, string message, int? id, CancellationToken cancellationToken)
+    private static async Task SendErrorResponseSse(Stream clientStream, int code, string message, string? id, CancellationToken cancellationToken)
     {
         var response = new JsonRpcErrorResponse
         {
@@ -287,8 +349,7 @@ internal static class SseEndpoint
 
         // Convert to bytes and write in a single operation
         var messageBytes = Encoding.UTF8.GetBytes(sseMessage);
-        Console.WriteLine($"Sending SSE message (length: {messageBytes.Length} bytes):");
-        Console.WriteLine(BitConverter.ToString(messageBytes));
+        Console.WriteLine($"Sending SSE error message (length: {messageBytes.Length} bytes)");
 
         await clientStream.WriteAsync(messageBytes, 0, messageBytes.Length, cancellationToken);
         await clientStream.FlushAsync(cancellationToken);
@@ -296,26 +357,15 @@ internal static class SseEndpoint
         Console.WriteLine($"Sent error response for request {id}: {json}");
     }
 
-    public class JsonRpcResponse<T>
+    private static T? TryToDeserialize<T>(string text) where T: class
     {
-        [JsonPropertyName("jsonrpc")]
-        public required string JsonRpc { get; set; } = "2.0";
-        public required T Result { get; init; }
-        public required int Id { get; init; }
-    }
-
-    public class JsonRpcErrorResponse
-    {
-        [JsonPropertyName("jsonrpc")]
-        public required string JsonRpc { get; set; } = "2.0";
-        public required JsonRpcError Error { get; init; }
-        public required int? Id { get; init; }
-    }
-
-    public class JsonRpcError
-    {
-        public required int Code { get; init; }
-        public required string Message { get; init; }
-        //public required object? Data { get; init; }
+        try
+        {
+            return JsonSerializer.Deserialize<T>(text, SseJsonSerializerOptions);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 }

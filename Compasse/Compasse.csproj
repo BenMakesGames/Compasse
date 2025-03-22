@@ -16,12 +16,48 @@
         <SymbolPackageFormat>snupkg</SymbolPackageFormat>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
 
+        <Description>An MCP SSE framework for .NET.</Description>
+        <Copyright>2025 Ben Hendel-Doying</Copyright>
+        <Version>1.0.0-beta</Version>
+
+        <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+        <PackageTags>monogame game engine framework di state</PackageTags>
+        <PackageProjectUrl>https://github.com/BenMakesGames/Compasse</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/BenMakesGames/Compasse</RepositoryUrl>
+        <PackageLicenseFile>LICENSE.md</PackageLicenseFile>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageIcon>icon.png</PackageIcon>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
         <OutputType>Library</OutputType>
         <TargetFramework>net9.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <WarningsAsErrors>Nullable</WarningsAsErrors>
     </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="../LICENSE.md">
+            <Pack>True</Pack>
+            <PackagePath />
+        </None>
+        <None Include="../README.md">
+            <Pack>True</Pack>
+            <PackagePath />
+        </None>
+        <None Include="../icon.png">
+            <Pack>True</Pack>
+            <PackagePath />
+        </None>
+    </ItemGroup>
+    <ItemGroup>
+        <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+    </ItemGroup>
 
     <ItemGroup>
         <None Include="../LICENSE.md">
