@@ -1,4 +1,4 @@
-> 🧚‍♀️ **Hey, listen!** Microsoft has an official MCP package, including support for SSE, here: https://github.com/modelcontextprotocol/csharp-sdk/issues
+> 🧚‍♀️ **Hey, listen!** Microsoft has an official MCP package, including support for SSE, here: https://github.com/modelcontextprotocol/csharp-sdk
 >
 > Use that! This project has been archived.
 
